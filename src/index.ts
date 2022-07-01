@@ -12,7 +12,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-import { Plugin, PluginServerApp } from '@signalk/server-api'
+import { Plugin, PluginServerApp, ResourceProvider } from '@signalk/server-api'
 import { Application } from 'express'
 import { parseString } from 'xml2js'
 import http from 'http'
@@ -36,28 +36,6 @@ const CONFIG_SCHEMA = {
 }
 
 const CONFIG_UISCHEMA = {}
-
-// ******  duplicate of '@signalk/server-api' until new version published ****
-type SignalKResourceType =
-  | 'routes'
-  | 'waypoints'
-  | 'notes'
-  | 'regions'
-  | 'charts'
-
-export type ResourceType = SignalKResourceType | string
-
-export interface ResourceProvider {
-  type: ResourceType
-  methods: ResourceProviderMethods
-}
-
-export interface ResourceProviderMethods {
-  listResources: (query: { [key: string]: any }) => Promise<any>
-  getResource: (id: string) => Promise<any>
-  setResource: (id: string, value: { [key: string]: any }) => Promise<any>
-  deleteResource: (id: string) => Promise<any>
-}
 
 // ***********************************************
 
@@ -169,7 +147,7 @@ module.exports = (server: WTMSProviderApp): Plugin => {
   // ************** tileJSON **************************
 
   // fetch list of charts
-  const getCharts = async (id?: string) => {
+  const getCharts = async (id?: string): Promise<{[id: string]: any}> => {
     return new Promise((resolve) => {
       fetchWMTS(settings.wmts.url)
         .then(xml => {

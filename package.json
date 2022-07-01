@@ -28,7 +28,7 @@
         "format": "prettier --write 'src/**/*.ts'"
     },
     "dependencies": {
-        "@signalk/server-api": "^1.39.0",
+        "@signalk/server-api": "^2.0.0-beta.1",
         "xml2js": "^0.4.23"
     },
     "devDependencies": {
