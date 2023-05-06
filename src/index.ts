@@ -12,111 +12,172 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-import { Plugin, PluginServerApp, ResourceProvider } from '@signalk/server-api'
-import { Application } from 'express'
+import {
+  Plugin,
+  PluginServerApp,
+  ResourceProviderRegistry
+} from '@signalk/server-api'
+import { Request, Response, Application } from 'express'
 import { parseString } from 'xml2js'
-import http from 'http'
-import https from 'https'
+
+interface ChartProvider {
+  identifier: string
+  name: string
+  description: string
+  type: 'wmts'
+  v1?: {
+    tilemapUrl: string
+    chartLayers: string[]
+  }
+  v2?: {
+    url: string
+    layers: string[]
+  }
+  bounds?: number[]
+  minzoom?: number
+  maxzoom?: number
+  format?: string
+  layers?: string[]
+}
+
+interface ChartProviders {
+  [key: string]: ChartProvider
+}
+
+// ***********************************************
+interface Config {
+  url: string
+}
+
+interface ChartProviderApp
+  extends PluginServerApp,
+    ResourceProviderRegistry,
+    Application {
+  statusMessage?: () => string
+  error: (msg: string) => void
+  debug: (...msg: unknown[]) => void
+  setPluginStatus: (pluginId: string, status?: string) => void
+  setPluginError: (pluginId: string, status?: string) => void
+  config: {
+    version: string
+  }
+}
 
 const CONFIG_SCHEMA = {
+  type: 'object',
   properties: {
-    wmts: {
-      type: 'object',
-      title: 'WMTS URL.',
-      description: 'Connect to WMTS server.',
-      properties: {
-        url: {
-          type: 'string',
-          title: 'WMTS url',
-          default: 'localhost'
-        }
-      }
+    url: {
+      type: 'string',
+      title: 'Path to WMTS capabilities metadata.',
+      description: 'URL that returns contents of WMTSCapabilities.xml',
+      default: 'http://localhost/wmts'
     }
   }
 }
 
 const CONFIG_UISCHEMA = {}
 
-// ***********************************************
-
-interface WTMSProviderApp extends Application, PluginServerApp {
-  registerResourceProvider: (resourceProvider: ResourceProvider) => void
-  setPluginStatus: (pluginId: string, status?: string) => void
-  setPluginError: (pluginId: string, status?: string) => void
-  error: (msg: string) => void
-  debug: (msg: string) => void
-}
-
-module.exports = (server: WTMSProviderApp): Plugin => {
-  let subscriptions: any[] = [] // stream subscriptions
-
+module.exports = (server: ChartProviderApp): Plugin => {
   let settings = {
-    // ** applied configuration settings
-    wmts: {
-      url: 'http://localhost/wmts'
-    }
+    url: 'http://localhost/wmts'
   }
+
+  const serverMajorVersion = parseInt(server.config.version.split('.')[0])
+
+  let chartProviders: ChartProviders = {}
 
   // ******** REQUIRED PLUGIN DEFINITION *******
   const plugin: Plugin = {
-    id: 'charts-wmts',
-    name: 'WMTS Charts Provider',
+    id: 'wmts-chart-provider',
+    name: 'WMTS Chart Provider',
     schema: () => CONFIG_SCHEMA,
     uiSchema: () => CONFIG_UISCHEMA,
-    start: (options: any, restart: any) => {
-      doStartup(options, restart)
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    start: (settings: any) => {
+      doStartup(settings)
     },
     stop: () => {
       doShutdown()
     }
   }
   // ************************************
-  const doStartup = (options: any, restart: any) => {
+  const doStartup = async (config: Config) => {
     try {
       server.debug('** starting..... **')
-      server.debug(`*** Loaded Configuration: ${JSON.stringify(options)}`)
+      server.debug(`*** Loaded Configuration: ${JSON.stringify(config)}`)
 
-      if (options && options.wmts && options.wmts.url) {
-        settings = options
-        if (settings.wmts.url.indexOf('http') !== 0) {
-          settings.wmts.url = `http://${settings.wmts.url}`
+      if (Number(process.versions.node.split('.')[0]) < 18) {
+        server.setPluginError('Error: NodeJS v18 or later required!')
+        return
+      }
+
+      if (config && config.url) {
+        settings = { ...config }
+        if (settings.url.indexOf('http') !== 0) {
+          settings.url = `http://${settings.url}`
         }
       }
 
       server.debug(`*** Applied Configuration: ${JSON.stringify(settings)}`)
 
-      registerProviders()
+      registerRoutes()
 
-      fetchWMTS(settings.wmts.url)
-        .then(() => {
-          server.setPluginStatus('Started')
-        })
-        .catch(err => {
-          server.setPluginError(err.message)
-        })
+      // get capabilities metadata (WMTSCapabilities.xml)
+      const res = await fetchFromWMTS(settings.url)
+      server.setPluginStatus('Started')
+      chartProviders = await parseCapabilities(res)
     } catch (err) {
       const msg = 'Started with errors!'
       server.setPluginError(msg)
 
       server.error('** EXCEPTION: **')
-      server.error((err as any).stack)
-      return err
+      server.error((err as Error).message)
     }
   }
 
   const doShutdown = () => {
     server.debug('** shutting down **')
-    // ************
-    server.debug('** Un-registering Update Handler(s) **')
-    subscriptions.forEach(b => b())
-    subscriptions = []
-
     server.setPluginStatus('Stopped')
   }
 
-  // *****************************************
+  /** Register router paths */
+  const registerRoutes = () => {
+    server.debug('** Registering API paths **')
 
-  const registerProviders = (): string[] => {
+    // v1 routes
+    server.get(
+      '/signalk/v1/api/resources/charts/:identifier',
+      (req: Request, res: Response) => {
+        const { identifier } = req.params
+        const provider = chartProviders[identifier]
+        if (provider) {
+          return res.json(cleanChartProvider(provider))
+        } else {
+          return res.status(404).send('Not found')
+        }
+      }
+    )
+
+    server.get(
+      '/signalk/v1/api/resources/charts',
+      (req: Request, res: Response) => {
+        const sanitized: ChartProviders = {}
+        Object.keys(chartProviders).forEach((id) => {
+          sanitized[id] = cleanChartProvider(chartProviders[id])
+        })
+        res.json(sanitized)
+      }
+    )
+
+    // v2 routes
+    if (serverMajorVersion === 2) {
+      server.debug('** Registering v2 API paths **')
+      registerAsProvider()
+    }
+  }
+
+  //** Register Signal K server Resources API Provider *
+  const registerAsProvider = (): string[] => {
     const failed: string[] = []
     const resType = 'charts'
     try {
@@ -124,15 +185,23 @@ module.exports = (server: WTMSProviderApp): Plugin => {
         type: resType,
         methods: {
           listResources: async (params: object) => {
-            return getCharts()
+            server.debug(params)
+            const res: ChartProviders = {}
+            Object.keys(chartProviders).forEach((id) => {
+              res[id] = cleanChartProvider(chartProviders[id])
+            })
+            return res
           },
-          getResource: (id: string) => {
-            return getCharts(id)
+          getResource: async (id: string) => {
+            return cleanChartProvider(chartProviders[id])
           },
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
           setResource: (id: string, value: any) => {
+            server.debug(id, value)
             throw new Error('Not Implemented!')
           },
           deleteResource: (id: string) => {
+            server.debug(id)
             throw new Error('Not Implemented!')
           }
         }
@@ -144,120 +213,38 @@ module.exports = (server: WTMSProviderApp): Plugin => {
     return failed
   }
 
-  // ************** tileJSON **************************
-
-  // fetch list of charts
-  const getCharts = async (id?: string): Promise<{[id: string]: any}> => {
+  /** Parse WMTSCapabilities.xml */
+  const parseCapabilities = (xml: string): Promise<ChartProviders> => {
     return new Promise((resolve) => {
-      fetchWMTS(settings.wmts.url)
-        .then(xml => {
-          parseString(xml, (err: Error, result: any) => {
-            const wmtsLayers = getWMTSLayers(result)
-            if (wmtsLayers.length === 0) {
-              resolve({})
-            } else {
-              let pa: Promise<any>[] = []
-              wmtsLayers.forEach((layer: any) => {
-                if (id) {
-                  if (
-                    [
-                      layer.identifier,
-                      `${layer.identifier}-tilejson`,
-                      `${layer.identifier}-metadata`
-                    ].includes(id)
-                  ) {
-                    server.debug(`processed id: ${id}`)
-                    if (id.indexOf('-tilejson') !== -1) {
-                      pa.push(tileJsonEntry(layer.identifier))
-                    } else if (id.indexOf('-metadata') !== -1) {
-                      pa.push(xyzEntry(layer.identifier))
-                    } else {
-                      pa.push(layer)
-                    }
-                  }
-                } else {
-                  pa.push(layer)
-                  pa.push(tileJsonEntry(layer.identifier))
-                  pa.push(xyzEntry(layer.identifier))
-                  server.debug(`processed identifier: ${layer.identifier}`)
-                }
-              })
-              Promise.all(pa).then(pr => {
-                const res: any = {}
-                pr.forEach(ch => {
-                  const key = ch.identifier ?? ch.name ?? null
-                  if (key) {
-                    res[key] = ch
-                  }
-                })
-                resolve(res)
-              })
-            }
-          })
-        })
-        .catch(err => {
-          server.debug(`*** getCharts() caught error ***`)
-          server.debug(err.message)
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      parseString(xml, (err: Error, result: any) => {
+        if (err) {
+          server.debug('** ERROR parsing XML! **')
           resolve({})
-        })
+        }
+        const wmtsLayers = getWMTSLayers(result)
+        const res = wmtsLayers.reduce(
+          (acc: ChartProviders, chart: ChartProvider) => {
+            acc[chart.identifier] = chart
+            return acc
+          },
+          {}
+        )
+        resolve(res)
+      })
     })
   }
 
-  const tileJsonEntry = (name: string) => {
-    return Promise.resolve({
-      identifier: `${name}-tilejson`,
-      name: name,
-      description: '',
-      sourceType: 'tilejson',
-      url: `${settings.wmts.url}/${name}.json`
-    })
-  }
-
-  // fetch map tileJSON metadata
-  const xyzEntry = (id: string) => {
-    return new Promise(resolve => {
-      fetchWMTS(`${settings.wmts.url}/${id}.json`)
-        .then(chartJson => {
-          let res = JSON.parse(chartJson as string)
-          res['identifier'] = `${id}-metadata`
-          res['sourceType'] = 'tilelayer'
-          resolve(res)
-        })
-        .catch(err => {
-          server.debug(`*** xyzEntry(${id}) error ***`)
-          server.debug(err.message)
-          resolve({})
-        })
-    })
-  }
-
-  const wtmsEntry = (layer: any) => {
-    if (
-      layer['ows:Identifier'] &&
-      Array.isArray(layer['ows:Identifier']) &&
-      layer['ows:Identifier'].length > 0
-    ) {
-      return {
-        identifier: `${layer['ows:Identifier'][0]}`,
-        name: layer['ows:Title'] ? layer['ows:Title'][0] : '',
-        description: layer['ows:Abstract'] ? layer['ows:Abstract'][0] : '',
-        sourceType: 'wmts',
-        url: `${settings.wmts.url}`,
-        layers: [layer['ows:Identifier'][0]]
-      }
-    } else {
-      return null
-    }
-  }
-
-  // retrieve the available layers from WMTS Capabilities
-  const getWMTSLayers = (result: { [key: string]: any }) => {
-    const maps: any[] = []
+  //** Retrieve the available layers from WMTS Capabilities metadata */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const getWMTSLayers = (result: { [key: string]: any }): ChartProvider[] => {
+    const maps: ChartProvider[] = []
     if (!result.Capabilities.Contents[0].Layer) {
       return maps
     }
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     result.Capabilities.Contents[0].Layer.forEach((layer: any) => {
-      const ch = wtmsEntry(layer)
+      const ch = parseLayerEntry(layer)
       if (ch) {
         maps.push(ch)
       }
@@ -265,32 +252,84 @@ module.exports = (server: WTMSProviderApp): Plugin => {
     return maps
   }
 
-  // fetch WMTS server capabilities.xml
-  const fetchWMTS = (url: string) => {
-    return new Promise((resolve, reject) => {
-      let req: any = http
-      if (url.indexOf('https://') !== -1) {
-        req = https
+  //** Parse WMTS layer entry */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const parseLayerEntry = (layer: any): ChartProvider | null => {
+    if (
+      layer['ows:Identifier'] &&
+      Array.isArray(layer['ows:Identifier']) &&
+      layer['ows:Identifier'].length > 0
+    ) {
+      const l: ChartProvider = {
+        identifier: `${layer['ows:Identifier'][0]}`,
+        name: layer['ows:Title'] ? layer['ows:Title'][0] : '',
+        description: layer['ows:Abstract'] ? layer['ows:Abstract'][0] : '',
+        type: 'wmts',
+        v1: {
+          tilemapUrl: `${settings.url}`,
+          chartLayers: [layer['ows:Identifier'][0]]
+        },
+        v2: {
+          url: `${settings.url}`,
+          layers: [layer['ows:Identifier'][0]]
+        }
       }
+      if (
+        layer['ows:WGS84BoundingBox'] &&
+        layer['ows:WGS84BoundingBox'].length > 0
+      ) {
+        l.bounds = [
+          Number(
+            layer['ows:WGS84BoundingBox'][0]['ows:LowerCorner'][0].split(' ')[0]
+          ),
+          Number(
+            layer['ows:WGS84BoundingBox'][0]['ows:LowerCorner'][0].split(' ')[1]
+          ),
+          Number(
+            layer['ows:WGS84BoundingBox'][0]['ows:UpperCorner'][0].split(' ')[0]
+          ),
+          Number(
+            layer['ows:WGS84BoundingBox'][0]['ows:UpperCorner'][0].split(' ')[1]
+          )
+        ]
+      }
+      if (layer['Format'] && layer['Format'].length > 0) {
+        const f = layer['Format'][0]
+        l.format = f.indexOf('jpg') !== -1 ? 'jpg' : 'png'
+      } else {
+        l.format = 'png'
+      }
+      //minzoom?: number
+      //maxzoom?: number
+      return l
+    } else {
+      return null
+    }
+  }
 
-      req
-        .get(url, (res: any) => {
-          let data = ''
+  /** Format chart data returned to the requestor. */
+  const cleanChartProvider = (provider: ChartProvider, version = 1) => {
+    let v
+    if (version === 1) {
+      v = Object.assign({}, provider.v1)
+    } else if (version === 2) {
+      v = Object.assign({}, provider.v2)
+    }
+    delete provider.v1
+    delete provider.v2
+    return Object.assign(provider, v)
+  }
 
-          res.on('data', (chunk: string) => {
-            data += chunk
-          })
-
-          res.on('end', () => {
-            resolve(data.toString())
-          })
-        })
-        .on('error', (error: Error) => {
-          server.debug(`*** fetchWMTS() caught error ***`)
-          server.debug(error.message)
-          reject(new Error('Error retrieving WMTS capabilities!'))
-        })
-    })
+  //** Make requests to WMTS server */
+  const fetchFromWMTS = async (url: string): Promise<string> => {
+    server.debug('**Fetching:', url)
+    const response = await fetch(url)
+    if (response.ok) {
+      return response.text()
+    } else {
+      server.debug(`*** fetchFromWMTS() response ERROR! ***`)
+      throw new Error('Error retrieving data from WMTS host!')
+    }
   }
 
   // ******************************************

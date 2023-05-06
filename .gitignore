@@ -1,2 +1,4 @@
+node_modules/
 /plugin
-/node_modules
+package-lock.json
+tsconfig.tsbuildinfo
