@@ -46,7 +46,8 @@ interface ChartProviders {
 
 // ***********************************************
 interface Config {
-  url: string
+  url: string,
+  noCapabilitesRequest: boolean
 }
 
 interface ChartProviderApp
@@ -68,9 +69,14 @@ const CONFIG_SCHEMA = {
   properties: {
     url: {
       type: 'string',
-      title: 'Path to WMTS capabilities metadata.',
-      description: 'URL that returns contents of WMTSCapabilities.xml',
+      title: 'Path to WMTS server.',
+      description: 'Note: Do NOT include parameters.',
       default: 'http://localhost/wmts'
+    },
+    noCapabilitesRequest: {
+      type: 'boolean',
+      title: 'Omit request parameter',
+      description: 'Do not include request=GetCapabilities parameter.',
     }
   }
 }
@@ -79,7 +85,8 @@ const CONFIG_UISCHEMA = {}
 
 module.exports = (server: ChartProviderApp): Plugin => {
   let settings = {
-    url: 'http://localhost/wmts'
+    url: 'http://localhost/wmts',
+    noCapabilitesRequest: false
   }
 
   const serverMajorVersion = parseInt(server.config.version.split('.')[0])
@@ -100,8 +107,9 @@ module.exports = (server: ChartProviderApp): Plugin => {
       doShutdown()
     }
   }
-  // ************************************
-  const doStartup = async (config: Config) => {
+
+  /** Plugin startup function */
+  const doStartup = (config: Config) => {
     try {
       server.debug('** starting..... **')
       server.debug(`*** Loaded Configuration: ${JSON.stringify(config)}`)
@@ -122,10 +130,9 @@ module.exports = (server: ChartProviderApp): Plugin => {
 
       registerRoutes()
 
-      // get capabilities metadata (WMTSCapabilities.xml)
-      const res = await fetchFromWMTS(settings.url)
+      // WMTS GetCapabilities request
+      wmtsGetCapabilities(settings.url)
       server.setPluginStatus('Started')
-      chartProviders = await parseCapabilities(res)
     } catch (err) {
       const msg = 'Started with errors!'
       server.setPluginError(msg)
@@ -135,6 +142,7 @@ module.exports = (server: ChartProviderApp): Plugin => {
     }
   }
 
+  /** Plugin shutdown function */
   const doShutdown = () => {
     server.debug('** shutting down **')
     server.setPluginStatus('Stopped')
@@ -321,14 +329,28 @@ module.exports = (server: ChartProviderApp): Plugin => {
   }
 
   //** Make requests to WMTS server */
-  const fetchFromWMTS = async (url: string): Promise<string> => {
+  const wmtsGetCapabilities = async (url: string) => {
+    url = !settings.noCapabilitesRequest ?  url + `?request=GetCapabilities` : url
     server.debug('**Fetching:', url)
     const response = await fetch(url)
     if (response.ok) {
-      return response.text()
+      const xml = await response.text()
+      if(xml.indexOf('<Capabilities') === -1) {
+        chartProviders = {}
+        server.debug(`*** wmtsGetCapabilities() response ERROR! ***`)
+        const msg = 'Response is not valid XML!'
+        server.setPluginError(msg)
+        throw new Error(msg)
+      } else {
+        chartProviders = await parseCapabilities(xml)
+      }
+      
     } else {
-      server.debug(`*** fetchFromWMTS() response ERROR! ***`)
-      throw new Error('Error retrieving data from WMTS host!')
+      chartProviders = {}
+      server.debug(`*** wmtsGetCapabilities() response ERROR! ***`)
+      const msg = 'Error retrieving data from WMTS host!!'
+      server.setPluginError(msg)
+      throw new Error(msg)
     }
   }
 
