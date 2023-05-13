@@ -45,9 +45,13 @@ interface ChartProviders {
 }
 
 // ***********************************************
-interface Config {
+interface WMTSConfigEntry {
   url: string,
   noCapabilitesRequest: boolean
+}
+
+interface Config {
+  servers: Array<WMTSConfigEntry>
 }
 
 interface ChartProviderApp
@@ -67,31 +71,41 @@ interface ChartProviderApp
 const CONFIG_SCHEMA = {
   type: 'object',
   properties: {
-    url: {
-      type: 'string',
-      title: 'Path to WMTS server.',
-      description: 'Note: Do NOT include parameters.',
-      default: 'http://localhost/wmts'
-    },
-    noCapabilitesRequest: {
-      type: 'boolean',
-      title: 'Omit request parameter',
-      description: 'Do not include request=GetCapabilities parameter.',
+    servers: {
+      type: 'array',
+      title: 'WMTS host URLs',
+      description: 'Add one or more WMTS server URLs.',
+      items: {
+        type: 'object',
+        properties: {
+          url: {
+            type: 'string',
+            title: 'WMTS server URL.',
+            description: 'Note: Do NOT include any parameters in url!'
+          },
+          noCapabilitesRequest: {
+            type: 'boolean',
+            title: 'Omit request parameter',
+            description: 'Do not include request=GetCapabilities parameter.',
+          }
+        }
+      }
     }
   }
 }
 
+// "http://www.ngs.noaa.gov/storm_archive/tilesx/tileserver.php?/wmts?/wmts/?/wmts"
+
 const CONFIG_UISCHEMA = {}
 
 module.exports = (server: ChartProviderApp): Plugin => {
-  let settings = {
-    url: 'http://localhost/wmts',
-    noCapabilitesRequest: false
+  let settings: Config = {
+    servers: []
   }
 
   const serverMajorVersion = parseInt(server.config.version.split('.')[0])
 
-  let chartProviders: ChartProviders = {}
+  const chartProviders: ChartProviders = {}
 
   // ******** REQUIRED PLUGIN DEFINITION *******
   const plugin: Plugin = {
@@ -119,11 +133,13 @@ module.exports = (server: ChartProviderApp): Plugin => {
         return
       }
 
-      if (config && config.url) {
+      if (config && config.servers) {
         settings = { ...config }
-        if (settings.url.indexOf('http') !== 0) {
-          settings.url = `http://${settings.url}`
-        }
+        settings.servers.forEach( (e: WMTSConfigEntry) => {
+          if( e.url.indexOf('http') !== 0) {
+            e.url = `http://${e.url}`
+          }
+        })
       }
 
       server.debug(`*** Applied Configuration: ${JSON.stringify(settings)}`)
@@ -131,7 +147,20 @@ module.exports = (server: ChartProviderApp): Plugin => {
       registerRoutes()
 
       // WMTS GetCapabilities request
-      wmtsGetCapabilities(settings.url)
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const reqArray: Promise<any>[] = []
+      settings.servers.forEach( async (e: WMTSConfigEntry) => {
+        reqArray.push(wmtsGetCapabilities(e))
+      })
+      Promise.allSettled(reqArray)
+      .then( results => {
+        results.forEach( result => {
+          if( result.status === 'fulfilled') {
+            Object.assign(chartProviders, result.value)
+          }
+        })
+      })
+      
       server.setPluginStatus('Started')
     } catch (err) {
       const msg = 'Started with errors!'
@@ -221,100 +250,6 @@ module.exports = (server: ChartProviderApp): Plugin => {
     return failed
   }
 
-  /** Parse WMTSCapabilities.xml */
-  const parseCapabilities = (xml: string): Promise<ChartProviders> => {
-    return new Promise((resolve) => {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      parseString(xml, (err: Error, result: any) => {
-        if (err) {
-          server.debug('** ERROR parsing XML! **')
-          resolve({})
-        }
-        const wmtsLayers = getWMTSLayers(result)
-        const res = wmtsLayers.reduce(
-          (acc: ChartProviders, chart: ChartProvider) => {
-            acc[chart.identifier] = chart
-            return acc
-          },
-          {}
-        )
-        resolve(res)
-      })
-    })
-  }
-
-  //** Retrieve the available layers from WMTS Capabilities metadata */
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const getWMTSLayers = (result: { [key: string]: any }): ChartProvider[] => {
-    const maps: ChartProvider[] = []
-    if (!result.Capabilities.Contents[0].Layer) {
-      return maps
-    }
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    result.Capabilities.Contents[0].Layer.forEach((layer: any) => {
-      const ch = parseLayerEntry(layer)
-      if (ch) {
-        maps.push(ch)
-      }
-    })
-    return maps
-  }
-
-  //** Parse WMTS layer entry */
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const parseLayerEntry = (layer: any): ChartProvider | null => {
-    if (
-      layer['ows:Identifier'] &&
-      Array.isArray(layer['ows:Identifier']) &&
-      layer['ows:Identifier'].length > 0
-    ) {
-      const l: ChartProvider = {
-        identifier: `${layer['ows:Identifier'][0]}`,
-        name: layer['ows:Title'] ? layer['ows:Title'][0] : '',
-        description: layer['ows:Abstract'] ? layer['ows:Abstract'][0] : '',
-        type: 'wmts',
-        v1: {
-          tilemapUrl: `${settings.url}`,
-          chartLayers: [layer['ows:Identifier'][0]]
-        },
-        v2: {
-          url: `${settings.url}`,
-          layers: [layer['ows:Identifier'][0]]
-        }
-      }
-      if (
-        layer['ows:WGS84BoundingBox'] &&
-        layer['ows:WGS84BoundingBox'].length > 0
-      ) {
-        l.bounds = [
-          Number(
-            layer['ows:WGS84BoundingBox'][0]['ows:LowerCorner'][0].split(' ')[0]
-          ),
-          Number(
-            layer['ows:WGS84BoundingBox'][0]['ows:LowerCorner'][0].split(' ')[1]
-          ),
-          Number(
-            layer['ows:WGS84BoundingBox'][0]['ows:UpperCorner'][0].split(' ')[0]
-          ),
-          Number(
-            layer['ows:WGS84BoundingBox'][0]['ows:UpperCorner'][0].split(' ')[1]
-          )
-        ]
-      }
-      if (layer['Format'] && layer['Format'].length > 0) {
-        const f = layer['Format'][0]
-        l.format = f.indexOf('jpg') !== -1 ? 'jpg' : 'png'
-      } else {
-        l.format = 'png'
-      }
-      //minzoom?: number
-      //maxzoom?: number
-      return l
-    } else {
-      return null
-    }
-  }
-
   /** Format chart data returned to the requestor. */
   const cleanChartProvider = (provider: ChartProvider, version = 1) => {
     let v
@@ -329,30 +264,120 @@ module.exports = (server: ChartProviderApp): Plugin => {
   }
 
   //** Make requests to WMTS server */
-  const wmtsGetCapabilities = async (url: string) => {
-    url = !settings.noCapabilitesRequest ?  url + `?request=GetCapabilities` : url
+  const wmtsGetCapabilities = async (wmts: WMTSConfigEntry) => {
+    const url = !wmts.noCapabilitesRequest ?  wmts.url + `?request=GetCapabilities&service=wmts` : wmts.url
     server.debug('**Fetching:', url)
     const response = await fetch(url)
     if (response.ok) {
       const xml = await response.text()
       if(xml.indexOf('<Capabilities') === -1) {
-        chartProviders = {}
         server.debug(`*** wmtsGetCapabilities() response ERROR! ***`)
-        const msg = 'Response is not valid XML!'
-        server.setPluginError(msg)
-        throw new Error(msg)
       } else {
-        chartProviders = await parseCapabilities(xml)
+        const cp = await parseCapabilities(xml, wmts.url)
+        return cp
       }
       
     } else {
-      chartProviders = {}
       server.debug(`*** wmtsGetCapabilities() response ERROR! ***`)
-      const msg = 'Error retrieving data from WMTS host!!'
-      server.setPluginError(msg)
-      throw new Error(msg)
     }
   }
+
+    /** Parse WMTSCapabilities.xml */
+    const parseCapabilities = (xml: string, urlBase: string): Promise<ChartProviders> => {
+      server.debug(`** parseCapabilities(${urlBase})`)
+      return new Promise((resolve) => {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        parseString(xml, (err: Error, result: any) => {
+          if (err) {
+            server.debug('** ERROR parsing XML! **')
+            resolve({})
+          }
+          const wmtsLayers = getWMTSLayers(result, urlBase)
+          const res = wmtsLayers.reduce(
+            (acc: ChartProviders, chart: ChartProvider) => {
+              acc[chart.identifier] = chart
+              return acc
+            },
+            {}
+          )
+          resolve(res)
+        })
+      })
+    }
+  
+    //** Retrieve the available layers from WMTS Capabilities metadata */
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const getWMTSLayers = (result: { [key: string]: any }, urlBase: string): ChartProvider[] => {
+      const maps: ChartProvider[] = []
+      if (!result.Capabilities.Contents[0].Layer) {
+        server.debug('** No Layers found!')
+        return maps
+      }
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      result.Capabilities.Contents[0].Layer.forEach((layer: any) => {
+        const ch = parseLayerEntry(layer, urlBase)
+
+        if (ch) {
+          maps.push(ch)
+        }
+      })
+      return maps
+    }
+  
+    //** Parse WMTS layer entry */
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const parseLayerEntry = (layer: any, urlBase: string): ChartProvider | null => {
+      if (
+        layer['ows:Identifier'] &&
+        Array.isArray(layer['ows:Identifier']) &&
+        layer['ows:Identifier'].length > 0
+      ) {
+        const l: ChartProvider = {
+          identifier: `${layer['ows:Identifier'][0]}`,
+          name: layer['ows:Title'] ? layer['ows:Title'][0] : '',
+          description: layer['ows:Abstract'] ? layer['ows:Abstract'][0] : '',
+          type: 'wmts',
+          v1: {
+            tilemapUrl: `${urlBase}`,
+            chartLayers: [layer['ows:Identifier'][0]]
+          },
+          v2: {
+            url: `${urlBase}`,
+            layers: [layer['ows:Identifier'][0]]
+          }
+        }
+        if (
+          layer['ows:WGS84BoundingBox'] &&
+          layer['ows:WGS84BoundingBox'].length > 0
+        ) {
+          l.bounds = [
+            Number(
+              layer['ows:WGS84BoundingBox'][0]['ows:LowerCorner'][0].split(' ')[0]
+            ),
+            Number(
+              layer['ows:WGS84BoundingBox'][0]['ows:LowerCorner'][0].split(' ')[1]
+            ),
+            Number(
+              layer['ows:WGS84BoundingBox'][0]['ows:UpperCorner'][0].split(' ')[0]
+            ),
+            Number(
+              layer['ows:WGS84BoundingBox'][0]['ows:UpperCorner'][0].split(' ')[1]
+            )
+          ]
+        }
+        if (layer['Format'] && layer['Format'].length > 0) {
+          const f = layer['Format'][0]
+          l.format = f.indexOf('jpg') !== -1 ? 'jpg' : 'png'
+        } else {
+          l.format = 'png'
+        }
+        //minzoom?: number
+        //maxzoom?: number
+        return l
+      } else {
+        return null
+      }
+    }
 
   // ******************************************
   return plugin
