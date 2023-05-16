@@ -47,7 +47,7 @@ interface ChartProviders {
 // ***********************************************
 interface WMTSConfigEntry {
   url: string,
-  noCapabilitesRequest: boolean
+  disable: boolean
 }
 
 interface Config {
@@ -80,21 +80,19 @@ const CONFIG_SCHEMA = {
         properties: {
           url: {
             type: 'string',
-            title: 'WMTS server URL.',
+            title: 'WMTS host URL.',
             description: 'Note: Do NOT include any parameters in url!'
           },
-          noCapabilitesRequest: {
+          disable: {
             type: 'boolean',
-            title: 'Omit request parameter',
-            description: 'Do not include request=GetCapabilities parameter.',
+            title: 'Disable',
+            description: 'Check to not query this WMTS host.',
           }
         }
       }
     }
   }
 }
-
-// "http://www.ngs.noaa.gov/storm_archive/tilesx/tileserver.php?/wmts?/wmts/?/wmts"
 
 const CONFIG_UISCHEMA = {}
 
@@ -265,7 +263,11 @@ module.exports = (server: ChartProviderApp): Plugin => {
 
   //** Make requests to WMTS server */
   const wmtsGetCapabilities = async (wmts: WMTSConfigEntry) => {
-    const url = !wmts.noCapabilitesRequest ?  wmts.url + `?request=GetCapabilities&service=wmts` : wmts.url
+    if(wmts.disable) {
+      server.debug(`*** DISABLED: ${wmts.url}`)
+      return 
+    }
+    const url = wmts.url + `?request=GetCapabilities&service=wmts`
     server.debug('**Fetching:', url)
     const response = await fetch(url)
     if (response.ok) {
