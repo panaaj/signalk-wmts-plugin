@@ -5,7 +5,10 @@ Signal K Node server `resource provider` plugin enabling the use of maps publish
 _**Note: Requires `Signal K` server running on `NodeJS` v18 or later!**_
 
 
-The plugin supports the Signal K server v2 Resources API and can be used in conjunction with other chart `resource provider` plugins.
+The plugin requires that WMTS hosts implement the `GetCapabilities` request to return _GetCapabilities.xml_ response. 
+Experience has found that not all servers respond correctly to `?service=wmts&request=GetCapabilities` queries, so it is worth checking first.
+
+The plugin also supports the Signal K server v2 Resources API and can be used in conjunction with other chart `resource provider` plugins.
 
 Chart metadata is made available to client apps via both `v1` and `v2` API paths.
 
