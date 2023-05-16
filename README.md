@@ -1,70 +1,65 @@
-# Tileserver-php Charts Plugin for Signal K:
+# WMTS Chart provider for Signal K server
 
-**Signal K Server** helper plugin for **Tileserver-php** that 
-acts as a Charts resource provider for the `/resurces/charts` Signal K path.
+Signal K Node server `resource provider` plugin enabling the use of maps published via WMTS (Web Map Tile Server) hosts.
+
+_**Note: Requires `Signal K` server running on `NodeJS` v18 or later!**_
+
+
+The plugin supports the Signal K server v2 Resources API and can be used in conjunction with other chart `resource provider` plugins.
+
+Chart metadata is made available to client apps via both `v1` and `v2` API paths.
+
+| Server Version | API | Path |
+|--- |--- |--- |
+| 1.x.x | v1 | `/signalk/v1/api/resources/charts` |
+| 2.x.x | v2 | `/signalk/v2/api/resources/charts` |
+
+
+_Example:_
+```JSON
+{
+    "mapa_base_rioja": {
+		"identifier": "mapa_base_rioja",
+		"name": "WMTS Mapa Base IDErioja",
+		"description": "Mapa Base IDErioja",
+		"type": "wmts",
+		"bounds": [-180, -90, 180, 90],
+		"format": "png",
+		"tilemapUrl": "https://rts.larioja.org/wmts/mapa_base_rioja",
+		"chartLayers": ["mapa_base_rioja"]
+	}
+}
+```
+
+
+### Usage
+
+1. Install `signalk-wmts-plugin` from the **Appstore** screen in the Signal K server admin console
+
+1. Once installed, restart the server and the locate `WMTS Chart provider` in the **Plugin Config** screen
+
+1. Add the `url` for each WMTS host publishing the maps you require.
+
+ _Important: The host url is the path to the WMTS service. 
+ It should NOT contain _request_ or _service_ parameters!_
+
+ _Example:_ 
+ `https://rts.larioja.org/wmts/mapa_base_rioja`
+
+_**The following example is incorrect!**_
+ ```
+ https://rts.larioja.org/wmts/mapa_base_rioja?service=wmts&request=GetCapabilities
+ ```
+
+4. Check **Disable** to not query the WMTS host. This allows multiple WMTS host entries to be maintained and only return map listings from selected ones.
+
+1. Click **Submit** to save the changes.
+
+1. **Enable** plugin
 
 ---
-_Note: this plugin requires a connection to a running `tileserver-php` instance._
 
----
+## System Requirements
 
-#### Operation:
-
-Configure the plugin with the url to the `tileserver-php` service
-
-Once configured and the enabled the plugin will query the `tileserver-php` service and use the `getCapabilities.xml` response to generate the following entries for each map layer:
-
--  `WTMS`: Signal K chart entry containing a url to the WTMS endpoint specifying the layer to be displayed.
-
-```JSON
-{
-    "Kvarken": {
-        "identifier":"Kvarken",
-        "name":"Kvarken",
-        "description":"",
-        "sourceType":"wmts",
-        "url":"http://localhost/wmts",
-        "layers":["Kvarken"]
-    }
-}
-```
-
--  `TileJSON`: Signal K chart entry containing a url to a TileJSON file for the layer.
-
-```JSON
-{
-    "Kvarken-tilejson": {
-        "identifier":"Kvarken-tilejson",
-        "name":"Kvarken",
-        "description":"",
-        "sourceType":"tilejson",
-        "url":"http://localhost/wmts/Kvarken.json"
-    }
-}
-```
-
--  `metadata`: Signal K chart entry containing the TileJSON metadata for the layer.
-
-```JSON
-{
-    "Kvarken-metadata": {
-        "name":"Kvarken",
-        "description":"Umeu00e5 to Hu00e4rnu00f6sand",
-        "format":"png",
-        "bounds":[17.899475097656,62.609771662592,23.090515136719,63.834613378993],
-        "center":"20.4949951171875,63.222192520792646,17","minzoom":3,
-        "maxzoom":17,
-        "profile":"mercator",
-        "tilesize":"256",
-        "scheme":"xyz",
-        "type":"overlay",
-        "basename":"Kvarken",
-        "scale":1,
-        "tiles":["http://localhost/wmts/Kvarken/{z}/{x}/{y}.png"],"tilejson":"2.0.0",
-        "identifier":"Kvarken-metadata",
-        "sourceType":"tilelayer"
-    }
-}
-```
-
+- `Signal K` server running on `NodeJS` v18 (or later).
 
